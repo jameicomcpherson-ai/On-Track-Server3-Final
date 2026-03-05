@@ -30,8 +30,8 @@ const PORT = process.env.PORT || 3001;
 
 // Initialize Prisma client
 export const prisma = new PrismaClient({
-  log: process.env.NODE_ENV === 'development' 
-    ? ['query', 'info', 'warn', 'error'] 
+  log: process.env.NODE_ENV === 'development'
+    ? ['query', 'info', 'warn', 'error']
     : ['error'],
 });
 
@@ -66,24 +66,26 @@ app.use(cors({
 
 // Rate limiting
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // Limit each IP to 100 requests per windowMs
+  windowMs: 15 * 60 * 1000,
+  max: 100,
   message: 'Too many requests from this IP, please try again later.',
   standardHeaders: true,
   legacyHeaders: false,
 });
+
 app.use(limiter);
 
-// Stricter rate limiting for auth endpoints
+// Stricter auth rate limits
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 5,
   message: 'Too many authentication attempts, please try again later.',
 });
+
 app.use('/api/auth/login', authLimiter);
 app.use('/api/auth/register', authLimiter);
 
-// Request logging
+// Logging
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 
 // Body parsing
@@ -91,28 +93,16 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // ============================================
-// HEALTH CHECK
+// RAILWAY HEALTHCHECK
 // ============================================
 
-app.get('/health', async (_req: Request, res: Response) => {
-  try {
-    // Check database connection
-    await prisma.$queryRaw`SELECT 1`;
-    
-    res.status(200).json({
-      status: 'healthy',
-      timestamp: new Date().toISOString(),
-      version: process.env.npm_package_version || '1.0.0',
-      environment: process.env.NODE_ENV,
-      database: 'connected',
-    });
-  } catch (error) {
-    res.status(503).json({
-      status: 'unhealthy',
-      timestamp: new Date().toISOString(),
-      error: 'Database connection failed',
-    });
-  }
+app.get('/health', (_req: Request, res: Response) => {
+  res.status(200).json({
+    status: 'ok',
+    service: 'ontrack-api',
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || 'development'
+  });
 });
 
 // ============================================
@@ -156,14 +146,17 @@ const server = app.listen(PORT, () => {
 ╔════════════════════════════════════════════════════════════╗
 ║                                                            ║
 ║   🚀 On Track API Server                                   ║
-║   Running on port ${PORT}                                    ║
-║   Environment: ${process.env.NODE_ENV || 'development'}                              ║
+║   Running on port ${PORT}                                  ║
+║   Environment: ${process.env.NODE_ENV || 'development'}    ║
 ║                                                            ║
 ╚════════════════════════════════════════════════════════════╝
   `);
 });
 
-// Graceful shutdown
+// ============================================
+// GRACEFUL SHUTDOWN
+// ============================================
+
 process.on('SIGTERM', async () => {
   console.log('SIGTERM received, shutting down gracefully...');
   server.close(async () => {
