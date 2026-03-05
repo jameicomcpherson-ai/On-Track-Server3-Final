@@ -1,0 +1,352 @@
+// On Track - Fintech Backend Schema
+// PostgreSQL with Prisma ORM
+// SOC2 Compliant Data Architecture
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// CORE USER TABLES
+// ============================================
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  nickname  String?
+  
+  // Financial Profile (PII - Encrypted at Application Layer)
+  monthlyNetIncome      Decimal  @db.Decimal(12, 2)
+  fundamentalExpenses   Decimal  @db.Decimal(12, 2)
+  automatedSavings      Decimal  @default(0) @db.Decimal(12, 2)
+  
+  // Calculated Fields
+  disposableIncome      Decimal  @db.Decimal(12, 2)
+  freedomDate           DateTime?
+  
+  // Plaid Integration
+  plaidAccessToken      String?  @db.Text // Encrypted
+  plaidItemId           String?
+  plaidAccountId        String?
+  
+  // Lithic Card Integration
+  lithicCardToken       String?
+  lithicAccountToken    String?
+  
+  // VoPay Integration
+  vopayCustomerId       String?
+  vopayFundingSourceId  String?
+  
+  // Security & Compliance
+  passwordHash          String
+  mfaSecret             String?  // Encrypted TOTP secret
+  mfaEnabled            Boolean  @default(false)
+  emailVerified         Boolean  @default(false)
+  
+  // Audit Fields
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+  lastLoginAt           DateTime?
+  
+  // Relations
+  liabilities           Liability[]
+  interventions         Intervention[]
+  transactions          Transaction[]
+  auditLogs             AuditLog[]
+  
+  @@index([email])
+  @@index([plaidItemId])
+  @@index([lithicCardToken])
+  @@map("users")
+}
+
+// ============================================
+// LIABILITIES (DEBTS) - THE "8% ENGINE"
+// ============================================
+
+model Liability {
+  id                String   @id @default(uuid())
+  userId            String
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  // Creditor Information
+  creditorName      String
+  creditorType      CreditorType
+  
+  // Balance & Terms
+  currentBalance    Decimal  @db.Decimal(12, 2)
+  originalBalance   Decimal  @db.Decimal(12, 2)
+  apr               Decimal  @db.Decimal(5, 2)  // Store as 24.99 for 24.99%
+  minimumPayment    Decimal  @db.Decimal(10, 2)
+  
+  // The "8% Logic" - High Priority Target Flag
+  isHighPriority    Boolean  @default(false)  // Auto-set if APR > 8%
+  priorityRank      Int?     // 1 = highest priority (Avalanche method)
+  
+  // Payoff Tracking
+  estimatedPayoffDate   DateTime?
+  totalInterestPaid     Decimal  @default(0) @db.Decimal(12, 2)
+  
+  // Status
+  status            LiabilityStatus @default(ACTIVE)
+  capturedAt        DateTime?
+  
+  // Plaid Reference
+  plaidAccountId    String?
+  plaidLiabilityId  String?  @unique
+  
+  // Metadata
+  nickname          String?  // e.g., "The Plastic Bandit"
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  // Relations
+  payments          Payment[]
+  interventions     Intervention[]
+  
+  @@index([userId])
+  @@index([userId, status])
+  @@index([userId, isHighPriority])
+  @@index([userId, priorityRank])
+  @@map("liabilities")
+}
+
+// ============================================
+// INTERVENTIONS - THE "QUICK DRAW" SYSTEM
+// ============================================
+
+model Intervention {
+  id                String   @id @default(uuid())
+  userId            String
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  // Transaction Details
+  originalAmount    Decimal  @db.Decimal(10, 2)
+  merchantName      String
+  merchantCategory  String?
+  
+  // Decision Logic
+  decision          InterventionDecision
+  decisionReason    String?
+  
+  // The "Setback Days" Calculation
+  setbackDays       Decimal  @db.Decimal(8, 2)  // e.g., 12.5 days
+  
+  // Impact on Freedom Date
+  freedomDateImpact Decimal  @db.Decimal(8, 2) // Days added to freedom date
+  
+  // Linked Liability (if funds redirected)
+  targetLiabilityId String?
+  targetLiability   Liability? @relation(fields: [targetLiabilityId], references: [id])
+  
+  // Lithic Integration
+  lithicTransactionToken  String?
+  lithicDeclinedAt        DateTime?
+  
+  // VoPay Integration (if sweep occurred)
+  vopayTransactionId      String?
+  sweptAmount             Decimal? @db.Decimal(10, 2)
+  sweptAt                 DateTime?
+  
+  // User Response
+  userRespondedAt   DateTime?
+  userResponseTimeMs Int?    // How fast did they respond?
+  
+  // Metadata
+  createdAt         DateTime @default(now())
+  
+  @@index([userId])
+  @@index([userId, decision])
+  @@index([userId, createdAt])
+  @@map("interventions")
+}
+
+// ============================================
+// PAYMENTS - DEBT CRUSHER AUTOMATION
+// ============================================
+
+model Payment {
+  id                String   @id @default(uuid())
+  liabilityId       String
+  liability         Liability @relation(fields: [liabilityId], references: [id], onDelete: Cascade)
+  
+  // Payment Details
+  amount            Decimal  @db.Decimal(10, 2)
+  principalAmount   Decimal  @db.Decimal(10, 2)
+  interestAmount    Decimal  @db.Decimal(10, 2)
+  
+  // Source
+  source            PaymentSource
+  sourceReference   String?  // Intervention ID, scheduled payment ID, etc.
+  
+  // Status
+  status            PaymentStatus @default(PENDING)
+  processedAt       DateTime?
+  failedReason      String?
+  
+  // VoPay Reference
+  vopayTransactionId String?
+  
+  createdAt         DateTime @default(now())
+  
+  @@index([liabilityId])
+  @@index([liabilityId, status])
+  @@index([createdAt])
+  @@map("payments")
+}
+
+// ============================================
+// TRANSACTIONS - PLAID SYNC
+// ============================================
+
+model Transaction {
+  id                String   @id @default(uuid())
+  userId            String
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  // Plaid Data
+  plaidTransactionId String   @unique
+  accountId         String
+  
+  // Transaction Details
+  amount            Decimal  @db.Decimal(10, 2)
+  currency          String   @default("USD")
+  date              DateTime
+  name              String
+  merchantName      String?
+  category          String[] // Plaid categories
+  
+  // Classification (for "Core Four" parser)
+  classification    TransactionClassification?
+  isRecurring       Boolean  @default(false)
+  
+  // Location
+  city              String?
+  region            String?
+  country           String?
+  
+  // Metadata
+  pending           Boolean  @default(false)
+  paymentChannel    String?
+  
+  createdAt         DateTime @default(now())
+  
+  @@index([userId])
+  @@index([userId, date])
+  @@index([userId, classification])
+  @@index([plaidTransactionId])
+  @@map("transactions")
+}
+
+// ============================================
+// AUDIT LOGS - SOC2 COMPLIANCE
+// ============================================
+
+model AuditLog {
+  id                String   @id @default(uuid())
+  userId            String
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  // Event Details
+  eventType         AuditEventType
+  eventDescription  String
+  
+  // Security Context
+  ipAddress         String?
+  userAgent         String?
+  
+  // Data Changes (for sensitive operations)
+  oldValues         Json?    // Encrypted if contains PII
+  newValues         Json?    // Encrypted if contains PII
+  
+  // Success/Failure
+  success           Boolean
+  failureReason     String?
+  
+  createdAt         DateTime @default(now())
+  
+  @@index([userId])
+  @@index([userId, eventType])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+// ============================================
+// ENUMS
+// ============================================
+
+enum CreditorType {
+  CREDIT_CARD
+  STUDENT_LOAN
+  AUTO_LOAN
+  PERSONAL_LOAN
+  MORTGAGE
+  COLLECTIONS
+  OTHER
+}
+
+enum LiabilityStatus {
+  ACTIVE
+  CAPTURED
+  PAID_OFF
+  ERROR
+}
+
+enum InterventionDecision {
+  APPROVED
+  DECLINED
+  PENDING
+  EXPIRED
+}
+
+enum PaymentSource {
+  INTERVENTION_SWEEP
+  SCHEDULED
+  MANUAL
+  ROUND_UP
+}
+
+enum PaymentStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum TransactionClassification {
+  INCOME
+  FUNDAMENTAL_EXPENSE
+  AUTOMATED_SAVINGS
+  FUN_SPENDING
+  DEBT_PAYMENT
+  INVESTMENT
+  TRANSFER
+  UNKNOWN
+}
+
+enum AuditEventType {
+  USER_LOGIN
+  USER_LOGOUT
+  USER_REGISTERED
+  MFA_ENABLED
+  MFA_DISABLED
+  PLAID_LINKED
+  LITHIC_CARD_CREATED
+  INTERVENTION_TRIGGERED
+  INTERVENTION_DECISION
+  PAYMENT_INITIATED
+  PAYMENT_COMPLETED
+  PAYMENT_FAILED
+  LIABILITY_ADDED
+  LIABILITY_UPDATED
+  LIABILITY_CAPTURED
+  SETTINGS_CHANGED
+  DATA_EXPORTED
+  ADMIN_ACCESS
+}
